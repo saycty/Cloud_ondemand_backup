@@ -2,7 +2,7 @@ const { google } = require("googleapis");
 const sqlAdmin = google.sqladmin("v1beta4");
 const Backup = require("../models/Backupmodel");
 
-async function triggerBackup(project, instance, description,id) {
+async function triggerBackup(project, instance, description, id) {
   try {
     const existingBackup = await Backup.findOne({ id });
     if (existingBackup) {
@@ -12,6 +12,7 @@ async function triggerBackup(project, instance, description,id) {
     const authClient = await google.auth.getClient({
       scopes: ["https://www.googleapis.com/auth/cloud-platform"],
     });
+
     const request = {
       project: project,
       instance: instance,
@@ -20,41 +21,40 @@ async function triggerBackup(project, instance, description,id) {
       },
       auth: authClient,
     };
-    const backupOperation = await new Promise((resolve, reject) => {
-      sqlAdmin.backupRuns.insert(request, async (err, response) => {
-        if (err) {
-          console.error("Error triggering backup:", err);
-          reject(err);
-          return;
-        }
-        console.log("Backup triggered successfully:", response.data);
-        resolve(response.data);
-      });
-    });
 
-    const operationId = backupOperation.name;
+    const backupOperation = await sqlAdmin.backupRuns.insert(request);
+    const operationId = backupOperation.data.name;
 
-    const status = await pollBackupStatus(project, instance, operationId, authClient);
+    const operationResponse = await waitForOperationToComplete(
+      project,
+      instance,
+      operationId,
+      authClient
+    );
 
-    if (status.status === 'DONE') {
-      try {
-        await Backup.create({ id });
-      } catch (err) {
-        console.error("Error saving backup ID to MongoDB:", err);
-        throw err;
-      }
+    if (operationResponse.status === "DONE") {
+      await Backup.create({ id });
+
+      return {
+        status: "DONE",
+        message: "Backup completed successfully",
+        operation: operationResponse,
+      };
     } else {
-      throw new Error('Backup operation did not complete successfully');
+      throw new Error("Backup operation did not complete successfully");
     }
-
-    return status;
   } catch (err) {
     console.error("Error:", err);
     throw err;
   }
 }
 
-async function pollBackupStatus(project, instance, operationId, authClient) {
+async function waitForOperationToComplete(
+  project,
+  instance,
+  operationId,
+  authClient
+) {
   try {
     while (true) {
       const operation = await sqlAdmin.operations.get({
@@ -63,15 +63,18 @@ async function pollBackupStatus(project, instance, operationId, authClient) {
         auth: authClient,
       });
 
-      const status = operation.data.status;
-      console.log(`Backup operation status: ${status}`);
+      console.log(`Backup operation status: ${operation.data.status}`);
 
-      if (status === 'DONE') {
+      if (operation.data.status === "DONE") {
         return operation.data;
-      } else if (status === 'PENDING' || status === 'RUNNING') {
-        await new Promise(resolve => setTimeout(resolve, 10000)); 
+      } else if (
+        operation.data.status === "PENDING" ||
+        operation.data.status === "RUNNING"
+      ) {
       } else {
-        throw new Error(`Backup operation failed or in unexpected state: ${status}`);
+        throw new Error(
+          `Backup operation failed or in unexpected state: ${operation.data.status}`
+        );
       }
     }
   } catch (err) {
